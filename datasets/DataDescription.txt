@@ -1,0 +1,3 @@
+This dataset contains surface defects in civil aviation steel components. The defect images are divided into a support set and a query set and comprise two categories: scratches and stains.
+
+
