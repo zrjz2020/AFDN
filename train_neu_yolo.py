@@ -24,5 +24,6 @@ if __name__ == '__main__':
     print('训练完毕')
 
     # Clean up
-    torch.cuda.empty_cache()  # 释放显存
-    gc.collect()  # 强制垃圾回收
+    torch.cuda.empty_cache()  
+
+    gc.collect()  
