@@ -23,7 +23,6 @@ preprocess = transforms.Compose([
 
 
 def read_label_file(label_path):
-    """读取标注文件，返回所有边界框的坐标列表（center_x, center_y, width, height）"""
     try:
         with open(label_path, 'r') as f:
             lines = f.readlines()
@@ -42,7 +41,6 @@ def read_label_file(label_path):
 
 
 def crop_image(image, bbox, img_width, img_height):
-    """根据边界框裁剪图像"""
     if bbox is None:
         return None
     center_x, center_y, width, height = bbox
@@ -61,26 +59,21 @@ def crop_image(image, bbox, img_width, img_height):
 
 def extract_embedding(image_path, bboxes):
     try:
-        # 读取图像
         img = Image.open(image_path).convert('RGB')
         img_width, img_height = img.size
 
         embeddings = []
         for i, bbox in enumerate(bboxes):
-            # 裁剪图像
             cropped_img = crop_image(img, bbox, img_width, img_height)
             if cropped_img is None:
                 print(f"无效的边界框 {i} 在 {image_path}")
                 continue
 
-            # 预处理裁剪后的图像
             img_tensor = preprocess(cropped_img).unsqueeze(0).to(device)
 
-            # 提取embedding
             with torch.no_grad():
                 embedding = model(img_tensor)
 
-            # 展平embedding
             embeddings.append((i, embedding.squeeze().cpu().numpy()))
 
         return embeddings if embeddings else None
@@ -100,11 +93,9 @@ def main():
     valid_image_extensions = ('.jpg', '.jpeg', '.png')
     valid_label_extension = '.txt'
 
-    # 遍历图像目录
     for img_name in os.listdir(image_dir):
         if img_name.lower().endswith(valid_image_extensions):
             img_path = os.path.join(image_dir, img_name)
-            # 构建对应的标注文件路径
             label_name = Path(img_name).stem + valid_label_extension
             label_path = os.path.join(label_dir, label_name)
 
@@ -113,19 +104,16 @@ def main():
                 continue
 
             try:
-                # 读取所有边界框
                 bboxes = read_label_file(label_path)
                 if bboxes is None:
                     print(f"错误：{img_name}的标注文件无有效边界框")
                     continue
 
-                # 提取所有边界框的embedding
                 embeddings = extract_embedding(img_path, bboxes)
                 if embeddings is None:
                     print(f"错误：{img_name}无法提取embedding")
                     continue
 
-                # 保存每个边界框的embedding
                 for bbox_index, embedding in embeddings:
                     output_path = os.path.join(output_dir, f"{Path(img_name).stem}_embedding_{bbox_index}.txt")
                     np.savetxt(output_path, embedding, fmt='%.6f')
@@ -136,3 +124,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
