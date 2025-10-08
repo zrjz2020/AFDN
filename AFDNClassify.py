@@ -82,7 +82,6 @@ for emb_path in embedding_files:
         print(f"Error processing {emb_path}: {e}")
         continue
 
-# 保存结果到 CSV
 if results:
     output_path = os.path.join(output_dir, "classification_results.csv")
     df = pd.DataFrame(results)
@@ -94,4 +93,5 @@ if results:
     except Exception as e:
         print(f"Error saving results to {output_path}: {e}")
 else:
+
     print("No results to save. Check input files and paths.")
