@@ -8,7 +8,7 @@ from PIL import Image
 import pandas as pd
 from sklearn.metrics import accuracy_score
 
-# 自定义数据集类
+
 class BoeingDataset(Dataset):
     def __init__(self, image_dir, label_dir, transform=None):
         self.image_dir = image_dir
@@ -25,15 +25,12 @@ class BoeingDataset(Dataset):
         label_path = os.path.join(self.label_dir, self.labels[idx])
         image = Image.open(img_path).convert('RGB')
 
-        # 读取标签文件并提取类 ID
         with open(label_path, 'r') as f:
             lines = f.readlines()
             if not lines:
                 raise ValueError(f"标签文件 {label_path} 为空")
-            # 取第一行的第一个值作为类 ID
             label = int(float(lines[0].strip().split()[0]))  # 将 '0' 或 '1'（可能为 '0.0' 或 '1.0'）转换为整数
 
-            # 可选：检查所有行的类 ID是否一致（如果需要确保每张图像只有一个类）
             for line in lines[1:]:
                 if line.strip():
                     other_label = int(float(line.strip().split()[0]))
@@ -45,7 +42,6 @@ class BoeingDataset(Dataset):
 
         return image, label
 
-# 数据预处理
 train_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -58,7 +54,6 @@ val_transform = transforms.Compose([
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-# 数据集路径
 train_img_dir = r"your path"
 train_label_dir = r"your path"
 val_img_dir = r"your path"
@@ -66,24 +61,20 @@ val_label_dir = r"your path"
 query_img_dir = r"your path"
 output_dir = r"your path"
 
-# 数据加载
 train_dataset = BoeingDataset(train_img_dir, train_label_dir, train_transform)
 val_dataset = BoeingDataset(val_img_dir, val_label_dir, val_transform)
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
 
-# 加载 VGG16 模型
 model = models.vgg16(pretrained=True)
 num_features = model.classifier[6].in_features
 model.classifier[6] = nn.Linear(num_features, 2)  # 假设二分类
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 
-# 损失函数和优化器
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# 训练函数
 def train_model(model, train_loader, criterion, optimizer, num_epochs=10):
     model.train()
     for epoch in range(num_epochs):
@@ -98,7 +89,7 @@ def train_model(model, train_loader, criterion, optimizer, num_epochs=10):
             running_loss += loss.item()
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(train_loader):.4f}")
 
-# 验证函数
+
 def validate_model(model, val_loader):
     model.eval()
     predictions, true_labels = [], []
@@ -113,7 +104,7 @@ def validate_model(model, val_loader):
     print(f"Validation Accuracy: {accuracy:.4f}")
     return predictions, true_labels
 
-# 预测函数
+
 def predict_model(model, query_img_dir, transform):
     model.eval()
     predictions = []
@@ -128,11 +119,11 @@ def predict_model(model, query_img_dir, transform):
             predictions.append((img_file, pred.item()))
     return predictions
 
-# 训练和验证
+
 train_model(model, train_loader, criterion, optimizer, num_epochs=10)
 validate_model(model, val_loader)
 
-# 预测并保存结果
+
 predictions = predict_model(model, query_img_dir, val_transform)
 df = pd.DataFrame(predictions, columns=['Image', 'Prediction'])
 output_path = os.path.join(output_dir, 'vgg16_predictions.csv')
