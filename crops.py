@@ -7,7 +7,6 @@ from ultralytics import YOLO
 import csv
 import numpy as np
 
-# 类映射（与训练脚本一致，Faster R-CNN 标签从 1 开始，0 为背景）
 class_names = {1: "scratches", 2: "stain"}
 
 
@@ -38,20 +37,16 @@ def predict_faster_rcnn(model, image_path, device, max_crops=4, threshold=0.2):
     if img_rgb is None:
         raise ValueError(f"无法加载图像: {image_path}")
 
-    # 转换为张量
     img_tensor = transforms.ToTensor()(img_rgb).to(device)
 
-    # 预测
     with torch.no_grad():
         predictions = model([img_tensor])[0]
 
-    # 提取边界框、标签和置信度
     bboxes = predictions['boxes'].cpu().numpy()
     labels = predictions['labels'].cpu().numpy()
     scores = predictions['scores'].cpu().numpy()
     print(f"Faster R-CNN raw boxes for {os.path.basename(image_path)}: {len(bboxes)}")
 
-    # 筛选置信度 > threshold 的框并按置信度排序，最多保留 max_crops 个
     valid_indices = [i for i, score in enumerate(scores) if score > threshold and labels[i] in class_names]
     print(f"Number of valid boxes before limiting (rcnn): {len(valid_indices)}")
     if len(valid_indices) > max_crops:
@@ -59,7 +54,6 @@ def predict_faster_rcnn(model, image_path, device, max_crops=4, threshold=0.2):
         valid_indices = [valid_indices[j] for j in sorted_indices]
         print(f"Number of boxes after limiting (rcnn): {len(valid_indices)}")
 
-    # 为每个边界框准备结果
     results = []
     for i in valid_indices:
         bbox = bboxes[i].tolist()
@@ -67,7 +61,6 @@ def predict_faster_rcnn(model, image_path, device, max_crops=4, threshold=0.2):
         score = scores[i]
         results.append((class_names[label], score, bbox, "Detected"))
 
-    # 如果没有有效预测，返回默认结果
     if not results:
         results = [("unknown", 0.0, None, "No detections")]
 
@@ -100,7 +93,6 @@ def predict_yolo(model, image_path, max_crops=4):
                     confidences.append(confidence)
                     predictions.append((class_name, confidence, bbox, "Detected"))
 
-        # 筛选置信度 > 0.1 的框并按置信度排序，最多保留 max_crops 个
         valid_indices = list(range(len(confidences)))  # 已经过滤 >0.1
         print(f"Number of valid boxes before limiting (yolo): {len(valid_indices)}")
         if len(valid_indices) > max_crops:
@@ -108,7 +100,6 @@ def predict_yolo(model, image_path, max_crops=4):
             valid_indices = [valid_indices[j] for j in sorted_indices]
             print(f"Number of boxes after limiting (yolo): {len(valid_indices)}")
 
-        # 为每个边界框准备结果
         yolo_results = []
         for i in valid_indices:
             bbox = bboxes[i]
@@ -116,7 +107,6 @@ def predict_yolo(model, image_path, max_crops=4):
             score = confidences[i]
             yolo_results.append((class_names.get(label, 'unknown'), score, bbox, "Detected"))
 
-        # 如果没有有效预测，返回默认结果
         if not yolo_results:
             yolo_results = [("unknown", 0.0, None, "No detections")]
 
@@ -130,7 +120,7 @@ def save_crops(img, img_output_dir, base_name, ext, predictions_info, model_type
     for idx, (class_name, score, bbox, status) in enumerate(predictions_info):
         if status == "Detected" and bbox is not None:
             x_min, y_min, x_max, y_max = map(int, bbox)
-            # 确保边界框坐标在图像范围内
+
             x_min = max(0, x_min)
             y_min = max(0, y_min)
             x_max = min(img.shape[1], x_max)
@@ -187,19 +177,15 @@ def predict_folder(yolo_weights, rcnn_weights, test_dir="./data/BoeingFewShot/Q/
     if not image_paths:
         raise ValueError(f"文件夹 {test_dir} 中没有找到 .jpg 或 .png 图像文件")
 
-    # 确定设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 加载模型
     yolo_model = load_yolo_model(yolo_weights)
     rcnn_model = load_faster_rcnn_model(rcnn_weights, device)
 
-    # 创建实验目录并准备输出 CSV 文件
     exp_dir = get_next_exp_dir()
     output_csv_yolo = os.path.join(exp_dir, "predictions_yolo.csv")
     output_csv_rcnn = os.path.join(exp_dir, "predictions_rcnn.csv")
 
-    # 存储预测结果
     predictions_yolo = []
     predictions_rcnn = []
 
@@ -231,7 +217,6 @@ def predict_folder(yolo_weights, rcnn_weights, test_dir="./data/BoeingFewShot/Q/
                 rcnn_start_num = current_count + 1
                 rcnn_results = predict_faster_rcnn(rcnn_model, image_path, device, max_crops=remaining_crops, threshold=0.1)
 
-                # 保存 RCNN 裁切图像
                 rcnn_saved = save_crops(img, img_output_dir, base_name, ext, rcnn_results, 'rcnn', start_num=rcnn_start_num)
                 current_count += rcnn_saved
 
@@ -269,7 +254,6 @@ def predict_folder(yolo_weights, rcnn_weights, test_dir="./data/BoeingFewShot/Q/
 
 
 if __name__ == "__main__":
-    # 示例用法
     yolo_weights = "your path"
     rcnn_weights = "your path"
     test_dir = "your path"
