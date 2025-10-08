@@ -28,14 +28,12 @@ class NeuDataset(Dataset):
         img_path = os.path.join(self.img_dir, img_name)
         label_path = os.path.join(self.label_dir, os.path.splitext(img_name)[0] + '.txt')
 
-        # 加载图像
         img = cv2.imread(img_path)
         if img is None:
             raise ValueError(f"无法加载图像: {img_path}")
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w = img.shape[:2]
 
-        # 读取标签
         boxes = []
         labels = []
         if os.path.exists(label_path):
@@ -89,34 +87,28 @@ def get_next_exp_dir(base_path="runs/train"):
 def train_model(data_dir=cfg['path'], epochs=20, batch_size=16):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 数据集路径
     train_img_dir = os.path.join(data_dir, cfg['train'])
     train_label_dir = os.path.join(data_dir, cfg['train'].replace('images', 'labels'))
     val_img_dir = os.path.join(data_dir, cfg['val'])
     val_label_dir = os.path.join(data_dir, cfg['val'].replace('images', 'labels'))
 
-    # 检查数据路径
     for d in [train_img_dir, train_label_dir, val_img_dir, val_label_dir]:
         if not os.path.exists(d):
             raise FileNotFoundError(f"数据目录不存在: {d}")
 
-    # 数据集
     train_dataset = NeuDataset(train_img_dir, train_label_dir)
     val_dataset = NeuDataset(val_img_dir, val_label_dir)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=lambda x: tuple(zip(*x)))
     val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=lambda x: tuple(zip(*x)))
 
-    # 加载 Faster R-CNN 模型
-    num_classes = len(cfg['names']) + 1  # 类别数 + 背景
+    num_classes = len(cfg['names']) + 1  
     model = fasterrcnn_resnet50_fpn(weights=None, num_classes=num_classes)
     model.to(device)
 
-    # 优化器
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
-    # 训练
     exp_dir = get_next_exp_dir()
     os.makedirs(os.path.join(exp_dir, "weights"), exist_ok=True)
     best_loss = float('inf')
@@ -127,7 +119,6 @@ def train_model(data_dir=cfg['path'], epochs=20, batch_size=16):
             images = list(image.to(device) for image in images)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-            # 检查目标数据
             for t in targets:
                 if t["boxes"].shape[0] == 0:
                     print("Warning: Empty boxes in batch, skipping loss computation")
@@ -148,10 +139,9 @@ def train_model(data_dir=cfg['path'], epochs=20, batch_size=16):
                 continue
         train_loss = train_loss / max(1, len(train_loader))
 
-        # 验证
         val_loss = 0.0
         with torch.no_grad():
-            model.train()  # 临时切换到训练模式以计算损失
+            model.train()  
             for images, targets in val_loader:
                 images = list(image.to(device) for image in images)
                 targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -165,12 +155,11 @@ def train_model(data_dir=cfg['path'], epochs=20, batch_size=16):
                 except Exception as e:
                     print(f"Validation loss computation failed: {str(e)}")
                     continue
-            model.eval()  # 恢复 eval 模式
+            model.eval()  
         val_loss = val_loss / max(1, len(val_loader))
 
         print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
 
-        # 保存最佳模型
         if val_loss < best_loss:
             best_loss = val_loss
             torch.save(model.state_dict(), os.path.join(exp_dir, "weights/best.pt"))
@@ -187,5 +176,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"训练失败: {str(e)}")
     # Clean up
-    torch.cuda.empty_cache()  # 释放显存
-    gc.collect()  # 强制垃圾回收
+    torch.cuda.empty_cache()  
+    gc.collect()  
