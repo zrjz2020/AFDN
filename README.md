@@ -2,7 +2,7 @@
 
 by Zewei Wu and Chengbin Peng, details are in paper.
 
-This study proposes a learning approach that can be trained using standardized industrial defect datasets to detect defects in few-shot non-standardized industrial defect production. Specifically, this approach initially utilizes the knowledge acquired from a standardized pretraining dataset to crop the data within the query set. Subsequently, an embedding extraction is employed to obtain feature embedding and classification results.
+This study proposes a learning approach that can be trained using standardized industrial defect datasets to detect defects in few-shot non-standardized industrial defect production. Specifically, this approach initially utilizes the knowledge acquired from a standardized pretraining dataset to crop the data within the query set. Subsequently, an embedding extraction is employed to obtain feature embedding and classification results.
 
 ### Dataset:
 
@@ -58,3 +58,4 @@ CAE.py
   keywords={Defect classification, Image Embedding, Domain adaptation, Few-shot learning}
 }
 ```
+
