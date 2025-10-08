@@ -29,7 +29,6 @@ preprocess = transforms.Compose([
 
 @torch.no_grad()
 def extract_embedding_for_image(img_path: str) -> Optional[np.ndarray]:
-    """对单张图像提取 2048 维 embedding（展平）。出错返回 None。"""
     try:
         img = Image.open(img_path).convert("RGB")
     except Exception as e:
@@ -53,7 +52,6 @@ def process_subfolder(folder_path: str):
         return
 
     while True:
-        # 收集该子文件夹内所有图片路径
         img_paths = [str(p) for p in folder.iterdir()
                      if p.is_file() and p.suffix.lower() in VALID_EXTS]
 
@@ -62,7 +60,6 @@ def process_subfolder(folder_path: str):
             return
 
         if len(img_paths) == 1:
-            # 只剩一张图片，保存其 embedding
             emb = extract_embedding_for_image(img_paths[0])
             if emb is not None:
                 out_name = f"final_embedding_{folder.name}.txt"
@@ -89,15 +86,12 @@ def process_subfolder(folder_path: str):
             print(f"无有效 embedding：{folder}")
             return
 
-        # 计算平均 embedding
         embs_np = np.stack(embs, axis=0)  # (N, 2048)
         ave_emb = embs_np.mean(axis=0)    # (2048,)
 
-        # 计算每张图片的 embedding 与平均 embedding 的余弦相似度
         similarities = [1 - cosine(emb, ave_emb) for emb in embs]  # 余弦相似度 = 1 - 余弦距离
         min_similarity_idx = np.argmin(similarities)  # 相似度最低的索引
 
-        # 删除相似度最低的图片
         try:
             os.remove(valid_img_paths[min_similarity_idx])
             print(f"已删除最不相似的图片：{valid_img_paths[min_similarity_idx]}，余弦相似度：{similarities[min_similarity_idx]:.6f}")
@@ -112,7 +106,6 @@ def main():
         print(f"根目录不存在：{root}")
         return
 
-    # 仅遍历一级子文件夹
     subfolders = [str(p) for p in root.iterdir() if p.is_dir()]
     if not subfolders:
         print(f"目录下无子文件夹：{root}")
@@ -127,4 +120,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
