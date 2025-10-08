@@ -78,13 +78,10 @@ def save_average_embedding(average_embedding, output_dir, output_filename):
     output_path = os.path.join(output_dir, output_filename)
 
     try:
-        # 获取保存前的文件修改时间（如果文件存在）
         original_mtime = os.path.getmtime(output_path) if os.path.exists(output_path) else 0
 
-        # 保存embedding
         np.savetxt(output_path, average_embedding, fmt='%.6f')
 
-        # 验证文件是否更新
         if os.path.exists(output_path):
             new_mtime = os.path.getmtime(output_path)
             if new_mtime > original_mtime:
@@ -100,20 +97,15 @@ def save_average_embedding(average_embedding, output_dir, output_filename):
 
 
 def main():
-    # 定义目录
     embeddings_dir = "your path"
     avg_embeddings_dir = "your path"
     label_dir = "your path"
 
-    # 定义类别映射
     class_map = {0: 'scratches', 1: 'stain'}
     class_to_idx = {'scratches': 0, 'stain': 1}
-
-    # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     try:
-        # 加载平均embedding作为初始W矩阵
         avg_embeddings = {
             'scratches': load_embedding(os.path.join(avg_embeddings_dir, "scratches_average_embedding.txt")),
             'stain': load_embedding(os.path.join(avg_embeddings_dir, "stain_average_embedding.txt"))
@@ -122,23 +114,17 @@ def main():
             print("错误：无法加载平均embedding文件")
             return
 
-        # 构造初始W矩阵 (2 x 2048)
         W = np.vstack([avg_embeddings['scratches'], avg_embeddings['stain']])
         W = torch.tensor(W, dtype=torch.float32, requires_grad=True, device=device)
 
-        # 初始化b向量 (2,)
         b = torch.zeros(2, dtype=torch.float32, requires_grad=True, device=device)
 
-        # 加载待分类的embedding
         embeddings, file_names = load_embeddings(embeddings_dir)
         if len(embeddings) == 0:
             print("错误：S_Embeddings 目录中未找到有效embedding文件")
             return
 
-        # 构造X矩阵 (2048 x N)
         X = torch.tensor(embeddings.T, dtype=torch.float32, device=device)
-
-        # 获取真实标签
         labels = []
         valid_indices = []
         for i, file_name in enumerate(file_names):
@@ -153,34 +139,27 @@ def main():
             print("错误：未找到任何有效标签")
             return
 
-        # 过滤有效的数据
         X = X[:, valid_indices]
         file_names = [file_names[i] for i in valid_indices]
         labels = torch.tensor(labels, dtype=torch.long, device=device)
 
-        # 定义损失函数和优化器
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam([W, b], lr=0.01)
 
-        # 优化循环
         max_epochs = 1000
         target_accuracy = 1.0
         for epoch in range(max_epochs):
             optimizer.zero_grad()
 
-            # 前向传播：P = softmax(WX + b)
             logits = W @ X + b.unsqueeze(1)  # (2 x N)
             logits = logits.T  # 转置为 (N x 2)
             P = torch.softmax(logits, dim=1)
 
-            # 计算损失
             loss = criterion(logits, labels)
 
-            # 反向传播
             loss.backward()
             optimizer.step()
 
-            # 评估分类准确率
             with torch.no_grad():
                 predictions = torch.argmax(P, dim=1)
                 correct = (predictions == labels).sum().item()
@@ -193,14 +172,12 @@ def main():
                     print(f"达到目标准确率 {accuracy * 100:.2f}% 在 epoch {epoch}")
                     break
 
-        # 使用优化后的W进行最终分类
         with torch.no_grad():
             logits = W @ X + b.unsqueeze(1)
             logits = logits.T  # 转置为 (N x 2)
             P = torch.softmax(logits, dim=1)
             predictions = torch.argmax(P, dim=1)
 
-        # 打印分类结果
         print("\n分类结果：")
         print("Embedding Name".ljust(30) + " | Classified Category | Correctness")
         print("-" * 80)
@@ -217,7 +194,6 @@ def main():
         print(f"\n已处理 {len(file_names)} 个embedding")
         print(f"最终分类准确率：{accuracy:.2f}% ({correct_count}/{len(file_names)} 正确)")
 
-        # 保存优化后的W矩阵
         W_np = W.cpu().numpy()
         save_average_embedding(W_np[0], avg_embeddings_dir, "scratches_average_embedding.txt")
         save_average_embedding(W_np[1], avg_embeddings_dir, "stain_average_embedding.txt")
@@ -229,4 +205,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
