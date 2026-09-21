@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,8 +10,8 @@ from pathlib import Path
 def load_embedding(file_path):
     try:
         embedding = np.loadtxt(file_path)
-        if embedding.shape != (2048,):
-            print(f"警告：{file_path} 的维度为 {embedding.shape}，预期为 (2048,)，跳过")
+        if embedding.ndim != 1:
+            print(f"警告：{file_path} 的维度为 {embedding.shape}，预期一维向量，跳过")
             return None
         print(f"已加载：{file_path}")
         return embedding
@@ -97,12 +98,13 @@ def save_average_embedding(average_embedding, output_dir, output_filename):
 
 
 def main():
-    embeddings_dir = "your path"
-    avg_embeddings_dir = "your path"
-    label_dir = "your path"
+    embeddings_dir = r"./datasets/BoeingFewShot/embeddings/S_Embeddings"
+    avg_embeddings_dir = r"./datasets/BoeingFewShot/embeddings/AveEmbedding"
+    label_dir = r"./datasets/BoeingFewShot/S/labels"
 
     class_map = {0: 'scratches', 1: 'stain'}
     class_to_idx = {'scratches': 0, 'stain': 1}
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     try:
@@ -122,9 +124,10 @@ def main():
         embeddings, file_names = load_embeddings(embeddings_dir)
         if len(embeddings) == 0:
             print("错误：S_Embeddings 目录中未找到有效embedding文件")
-            return
+            sys.exit(1)
 
         X = torch.tensor(embeddings.T, dtype=torch.float32, device=device)
+
         labels = []
         valid_indices = []
         for i, file_name in enumerate(file_names):
@@ -144,21 +147,19 @@ def main():
         labels = torch.tensor(labels, dtype=torch.long, device=device)
 
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam([W, b], lr=0.01)
+        optimizer = optim.Adam([W, b], lr=1e-4)
 
         max_epochs = 1000
         target_accuracy = 1.0
         for epoch in range(max_epochs):
             optimizer.zero_grad()
 
-            logits = W @ X + b.unsqueeze(1)  # (2 x N)
-            logits = logits.T  # 转置为 (N x 2)
+            logits = W @ X + b.unsqueeze(1)
+            logits = logits.T
             P = torch.softmax(logits, dim=1)
 
             loss = criterion(logits, labels)
-
             loss.backward()
-            optimizer.step()
 
             with torch.no_grad():
                 predictions = torch.argmax(P, dim=1)
@@ -169,12 +170,14 @@ def main():
                     print(f"Epoch {epoch}, Loss: {loss.item():.6f}, Accuracy: {accuracy:.4f}")
 
                 if accuracy >= target_accuracy:
-                    print(f"达到目标准确率 {accuracy * 100:.2f}% 在 epoch {epoch}")
+                    print(f"达到目标准确率 {accuracy * 100:.2f}% 在 epoch {epoch}（W 保持当前状态）")
                     break
+
+            optimizer.step()
 
         with torch.no_grad():
             logits = W @ X + b.unsqueeze(1)
-            logits = logits.T  # 转置为 (N x 2)
+            logits = logits.T
             P = torch.softmax(logits, dim=1)
             predictions = torch.argmax(P, dim=1)
 
@@ -194,9 +197,10 @@ def main():
         print(f"\n已处理 {len(file_names)} 个embedding")
         print(f"最终分类准确率：{accuracy:.2f}% ({correct_count}/{len(file_names)} 正确)")
 
-        W_np = W.cpu().numpy()
-        save_average_embedding(W_np[0], avg_embeddings_dir, "scratches_average_embedding.txt")
-        save_average_embedding(W_np[1], avg_embeddings_dir, "stain_average_embedding.txt")
+        W_np = W.detach().cpu().numpy()
+        cae_dir = os.path.join(os.path.dirname(avg_embeddings_dir), "CAE_AveEmbedding")
+        save_average_embedding(W_np[0], cae_dir, "scratches.txt")
+        save_average_embedding(W_np[1], cae_dir, "stain.txt")
 
     except FileNotFoundError as e:
         print(f"错误：{str(e)}")
@@ -205,5 +209,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()

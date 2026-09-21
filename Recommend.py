@@ -1,33 +1,16 @@
 import os
 from pathlib import Path
 import numpy as np
-import torch
-import torch.nn as nn
-from torchvision import models, transforms
 from PIL import Image
 from typing import Optional
 from scipy.spatial.distance import cosine
 
+import feature_extractor as fe
 
-ROOT_DIR = r"your path"
+ROOT_DIR = r"./datasets/BoeingFewShot/crop"
 VALID_EXTS = (".jpg", ".jpeg", ".png")
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = models.resnet50(pretrained=True)
-model = nn.Sequential(*list(model.children())[:-1])  # 输出形状 (B, 2048, 1, 1)
-model = model.to(device)
-model.eval()
-
-preprocess = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
-
-@torch.no_grad()
 def extract_embedding_for_image(img_path: str) -> Optional[np.ndarray]:
     try:
         img = Image.open(img_path).convert("RGB")
@@ -36,14 +19,10 @@ def extract_embedding_for_image(img_path: str) -> Optional[np.ndarray]:
         return None
 
     try:
-        img_tensor = preprocess(img).unsqueeze(0).to(device)  # (1, 3, 224, 224)
-        feat = model(img_tensor)  # (1, 2048, 1, 1)
-        emb = feat.squeeze().detach().cpu().numpy()  # (2048,)
-        return emb
+        return fe.extract(img)
     except Exception as e:
         print(f"跳过：提取 {img_path} 的 embedding 失败，原因：{e}")
         return None
-
 
 def process_subfolder(folder_path: str):
     folder = Path(folder_path)
@@ -73,7 +52,6 @@ def process_subfolder(folder_path: str):
                 print(f"无法提取最后一张图片的 embedding：{img_paths[0]}")
             return
 
-
         embs = []
         valid_img_paths = []
         for p in img_paths:
@@ -86,11 +64,11 @@ def process_subfolder(folder_path: str):
             print(f"无有效 embedding：{folder}")
             return
 
-        embs_np = np.stack(embs, axis=0)  # (N, 2048)
-        ave_emb = embs_np.mean(axis=0)    # (2048,)
+        embs_np = np.stack(embs, axis=0)
+        ave_emb = embs_np.mean(axis=0)
 
-        similarities = [1 - cosine(emb, ave_emb) for emb in embs]  # 余弦相似度 = 1 - 余弦距离
-        min_similarity_idx = np.argmin(similarities)  # 相似度最低的索引
+        similarities = [1 - cosine(emb, ave_emb) for emb in embs]
+        min_similarity_idx = np.argmin(similarities)
 
         try:
             os.remove(valid_img_paths[min_similarity_idx])
@@ -98,7 +76,6 @@ def process_subfolder(folder_path: str):
         except Exception as e:
             print(f"删除失败：{valid_img_paths[min_similarity_idx]}，原因：{e}")
             return
-
 
 def main():
     root = Path(ROOT_DIR)
@@ -118,7 +95,5 @@ def main():
 
     print("全部完成。")
 
-
 if __name__ == "__main__":
-
     main()

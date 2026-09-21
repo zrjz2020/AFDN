@@ -1,25 +1,9 @@
-import torch
-import torch.nn as nn
-from torchvision import models, transforms
-from PIL import Image
 import os
 import numpy as np
 from pathlib import Path
+from PIL import Image
 
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-model = models.resnet50(pretrained=True)
-model = nn.Sequential(*list(model.children())[:-1])
-model = model.to(device)
-model.eval()
-
-preprocess = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
+import feature_extractor as fe
 
 
 def read_label_file(label_path):
@@ -31,9 +15,9 @@ def read_label_file(label_path):
             parts = line.strip().split()
             if len(parts) < 5:
                 continue
-            # 提取边界框坐标，忽略class_id
+            class_id = int(float(parts[0]))
             center_x, center_y, width, height = map(float, parts[1:5])
-            bboxes.append((center_x, center_y, width, height))
+            bboxes.append((class_id, center_x, center_y, width, height))
         return bboxes if bboxes else None
     except Exception as e:
         print(f"错误：读取{label_path}时发生错误：{str(e)}")
@@ -43,13 +27,11 @@ def read_label_file(label_path):
 def crop_image(image, bbox, img_width, img_height):
     if bbox is None:
         return None
-    center_x, center_y, width, height = bbox
-    # 将归一化坐标转换为像素坐标
+    class_id, center_x, center_y, width, height = bbox
     x_min = int((center_x - width / 2) * img_width)
     x_max = int((center_x + width / 2) * img_width)
     y_min = int((center_y - height / 2) * img_height)
     y_max = int((center_y + height / 2) * img_height)
-    # 确保坐标有效
     x_min, x_max = max(0, x_min), min(img_width, x_max)
     y_min, y_max = max(0, y_min), min(img_height, y_max)
     if x_max <= x_min or y_max <= y_min:
@@ -69,12 +51,9 @@ def extract_embedding(image_path, bboxes):
                 print(f"无效的边界框 {i} 在 {image_path}")
                 continue
 
-            img_tensor = preprocess(cropped_img).unsqueeze(0).to(device)
+            embedding = fe.extract(cropped_img)
 
-            with torch.no_grad():
-                embedding = model(img_tensor)
-
-            embeddings.append((i, embedding.squeeze().cpu().numpy()))
+            embeddings.append((i, bbox[0], embedding))
 
         return embeddings if embeddings else None
 
@@ -84,11 +63,15 @@ def extract_embedding(image_path, bboxes):
 
 
 def main():
-    image_dir = "your path"
-    label_dir = "your path"
-    output_dir = "your path"
+    image_dir = "./datasets/BoeingFewShot/S/images"
+    label_dir = "./datasets/BoeingFewShot/S/labels"
+    output_root = "./datasets/BoeingFewShot/embeddings"
+    CLASS_DIR = {0: "S", 1: "T"}
+    output_dir = os.path.join(output_root, "S_Embeddings")
 
     os.makedirs(output_dir, exist_ok=True)
+    for d in CLASS_DIR.values():
+        os.makedirs(os.path.join(output_root, d), exist_ok=True)
 
     valid_image_extensions = ('.jpg', '.jpeg', '.png')
     valid_label_extension = '.txt'
@@ -114,14 +97,20 @@ def main():
                     print(f"错误：{img_name}无法提取embedding")
                     continue
 
-                for bbox_index, embedding in embeddings:
-                    output_path = os.path.join(output_dir, f"{Path(img_name).stem}_embedding_{bbox_index}.txt")
+                stem = Path(img_name).stem
+                for bbox_index, class_id, embedding in embeddings:
+                    if class_id in CLASS_DIR:
+                        class_out_path = os.path.join(output_root, CLASS_DIR[class_id],
+                                                      f"{stem}_embedding_{bbox_index}.txt")
+                        np.savetxt(class_out_path, embedding, fmt='%.6f')
+                    else:
+                        print(f"警告：{img_name} 边界框 {bbox_index} 的类别 id {class_id} 未定义，跳过分流")
+                    output_path = os.path.join(output_dir, f"{stem}_embedding_{bbox_index}.txt")
                     np.savetxt(output_path, embedding, fmt='%.6f')
-                    print(f"已处理：{img_name} 的边界框 {bbox_index}，保存至 {output_path}")
+                    print(f"已处理：{img_name} 的边界框 {bbox_index} (class={class_id})，保存至 {output_path}")
             except Exception as e:
                 print(f"错误：处理{img_name}时发生错误：{str(e)}")
 
 
 if __name__ == "__main__":
     main()
-

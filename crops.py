@@ -1,20 +1,103 @@
-import os
-import cv2
-import torch
-from torchvision import transforms
-from torchvision.models.detection import fasterrcnn_resnet50_fpn
-from ultralytics import YOLO
+import argparse
 import csv
-import numpy as np
+import gc
+import io
+import builtins
+import os
+import shutil
+import sys
+from pathlib import Path
 
-class_names = {1: "scratches", 2: "stain"}
+import cv2
+import numpy as np
+import torch
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
+
+
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+_orig_print = builtins.print
+def _print_flush(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    return _orig_print(*args, **kwargs)
+builtins.print = _print_flush
+
+
+CLASS_NAMES = {1: "scratches", 2: "stain"}
+
+
+
+def _class_wise_nms(boxes, labels, scores, iou_thr=0.5):
+    keep = []
+    for cls in np.unique(labels):
+        cls_idx = np.where(labels == cls)[0]
+        if len(cls_idx) == 0:
+            continue
+        c_boxes = boxes[cls_idx]
+        c_scores = scores[cls_idx]
+        order = np.argsort(-c_scores)
+        suppressed = np.zeros(len(cls_idx), dtype=bool)
+        for _i in range(len(order)):
+            i = order[_i]
+            if suppressed[i]:
+                continue
+            keep.append(cls_idx[i])
+            x1 = c_boxes[i, 0]; y1 = c_boxes[i, 1]; x2 = c_boxes[i, 2]; y2 = c_boxes[i, 3]
+            area_i = (x2 - x1) * (y2 - y1)
+            for _j in range(_i + 1, len(order)):
+                j = order[_j]
+                if suppressed[j]:
+                    continue
+                xx1 = max(x1, c_boxes[j, 0]); yy1 = max(y1, c_boxes[j, 1])
+                xx2 = min(x2, c_boxes[j, 2]); yy2 = min(y2, c_boxes[j, 3])
+                w = max(0.0, xx2 - xx1); h = max(0.0, yy2 - yy1)
+                inter = w * h
+                area_j = (c_boxes[j, 2] - c_boxes[j, 0]) * (c_boxes[j, 3] - c_boxes[j, 1])
+                iou = inter / max(1e-8, area_i + area_j - inter)
+                if iou > iou_thr:
+                    suppressed[j] = True
+    keep.sort(key=lambda i: -scores[i])
+    return keep
+
+
+def _expand_bbox(x1, y1, x2, y2, W, H, expand_ratio=0.1):
+    bw = x2 - x1
+    bh = y2 - y1
+    ex = bw * expand_ratio
+    ey = bh * expand_ratio
+    nx1 = int(max(0, x1 - ex))
+    ny1 = int(max(0, y1 - ey))
+    nx2 = int(min(W, x2 + ex))
+    ny2 = int(min(H, y2 + ey))
+    if nx2 - nx1 <= 0 or ny2 - ny1 <= 0:
+        return int(max(0, x1)), int(max(0, y1)), int(min(W, x2)), int(min(H, y2))
+    return nx1, ny1, nx2, ny2
+
+
+def _imread(path):
+    data = np.fromfile(path, dtype=np.uint8)
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def _imwrite(path, img):
+    ext = Path(path).suffix.lower() or ".jpg"
+    ok, buf = cv2.imencode(ext, img)
+    if not ok:
+        return False
+    buf.tofile(path)
+    return True
+
 
 
 def load_faster_rcnn_model(weights_path, device):
     try:
         model = fasterrcnn_resnet50_fpn(weights=None, num_classes=3)
-        state_dict = torch.load(weights_path, map_location=device)
-        model.load_state_dict(state_dict)
+        state = torch.load(weights_path, map_location=device)
+        missing, unexpected = model.load_state_dict(state)
+        if missing or unexpected:
+            print(f"[WARN] R-CNN load_state_dict: missing={len(missing)}, unexpected={len(unexpected)}")
         model.to(device)
         model.eval()
         print(f"Loaded Faster R-CNN weights from {weights_path}")
@@ -23,242 +106,276 @@ def load_faster_rcnn_model(weights_path, device):
         raise ValueError(f"加载 Faster R-CNN 模型失败: {str(e)}")
 
 
-def load_yolo_model(weights_path):
-    try:
-        model = YOLO(weights_path)
-        print(f"Loaded YOLO weights from {weights_path}")
-        return model
-    except Exception as e:
-        raise ValueError(f"加载 YOLO 模型失败: {str(e)}")
 
 
-def predict_faster_rcnn(model, image_path, device, max_crops=4, threshold=0.2):
-    img_rgb = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
-    if img_rgb is None:
-        raise ValueError(f"无法加载图像: {image_path}")
 
-    img_tensor = transforms.ToTensor()(img_rgb).to(device)
+def _save_crop_and_record(bgr_img, bbox, label, score, model_type, output_dir,
+                          base_name, ext, idx):
+    if score is None or score <= 0:
+        return None
+    x1, y1, x2, y2 = map(float, bbox)
+    H, W = bgr_img.shape[:2]
+    x1, y1, x2, y2 = _expand_bbox(x1, y1, x2, y2, W, H, expand_ratio=0.08)
+    w = x2 - x1; h = y2 - y1
+    if w <= 16 or h <= 16:
+        print(f"skip {model_type} crop: w={w} h={h} too small")
+        return None
+    ratio = w / max(1, h); rinv = h / max(1, w)
+    if ratio > 50 or rinv > 50:
+        print(f"skip {model_type} crop: aspect_ratio={max(ratio, rinv):.2f} >50:1")
+        return None
+    cropped = bgr_img[y1:y2, x1:x2]
+    if cropped.size == 0:
+        return None
+    class_name = CLASS_NAMES.get(int(label), "unknown")
+    if class_name == "unknown":
+        return None
+    label_text = f"{model_type}_{class_name}_{float(score):.2f}"
+    out_path = os.path.join(output_dir, base_name, f"{base_name}_{idx}_{label_text}{ext}")
+    os.makedirs(os.path.join(output_dir, base_name), exist_ok=True)
+    if not _imwrite(out_path, cropped):
+        print(f"[WARN] failed to write crop {out_path}")
+        return None
+    print(f"saved {out_path}")
+    return (class_name, float(score), [int(x1), int(y1), int(x2), int(y2)], "Detected")
 
+
+def _save_fallback(bgr_img, image_path, output_dir):
+    name = os.path.basename(image_path)
+    base, ext = os.path.splitext(name)
+    img_dir = os.path.join(output_dir, base)
+    os.makedirs(img_dir, exist_ok=True)
+    out_path = os.path.join(img_dir, name)
+    _imwrite(out_path, bgr_img)
+    print(f"saved fallback (no detection) -> {out_path}")
+    return [("unknown", 0.0, None, "No detections")]
+
+
+
+def predict_rcnn(model, bgr_img, image_path, output_dir, device,
+                 conf_thr, max_crops, nms_iou):
+    img_rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+    tensor = torch.from_numpy(img_rgb).permute(2, 0, 1).contiguous()
+    tensor = tensor.to(device).float().div_(255.0)
     with torch.no_grad():
-        predictions = model([img_tensor])[0]
-
-    bboxes = predictions['boxes'].cpu().numpy()
-    labels = predictions['labels'].cpu().numpy()
-    scores = predictions['scores'].cpu().numpy()
-    print(f"Faster R-CNN raw boxes for {os.path.basename(image_path)}: {len(bboxes)}")
-
-    valid_indices = [i for i, score in enumerate(scores) if score > threshold and labels[i] in class_names]
-    print(f"Number of valid boxes before limiting (rcnn): {len(valid_indices)}")
-    if len(valid_indices) > max_crops:
-        sorted_indices = np.argsort([scores[i] for i in valid_indices])[-max_crops:]
-        valid_indices = [valid_indices[j] for j in sorted_indices]
-        print(f"Number of boxes after limiting (rcnn): {len(valid_indices)}")
-
+        preds = model([tensor])[0]
+    boxes = preds["boxes"].detach().cpu().numpy()
+    labels = preds["labels"].detach().cpu().numpy().astype(np.int64)
+    scores = preds["scores"].detach().cpu().numpy().astype(np.float64)
+    print(f"  rcnn raw boxes for {os.path.basename(image_path)}: {len(boxes)}")
+    valid_mask = (scores > conf_thr)
+    for i in range(len(labels)):
+        if int(labels[i]) not in CLASS_NAMES:
+            valid_mask[i] = False
+    valid_idx = np.where(valid_mask)[0]
+    if len(valid_idx) == 0:
+        return []
+    boxes = boxes[valid_idx]; labels = labels[valid_idx]; scores = scores[valid_idx]
+    keep = _class_wise_nms(boxes, labels, scores, iou_thr=nms_iou)
+    boxes = boxes[keep]; labels = labels[keep]; scores = scores[keep]
+    print(f"  rcnn valid after NMS/conf: {len(boxes)}")
+    order = np.argsort(-scores)[:max_crops]
+    base, ext = os.path.splitext(os.path.basename(image_path))
     results = []
-    for i in valid_indices:
-        bbox = bboxes[i].tolist()
-        label = labels[i]
-        score = scores[i]
-        results.append((class_names[label], score, bbox, "Detected"))
-
-    if not results:
-        results = [("unknown", 0.0, None, "No detections")]
-
+    for rank, k in enumerate(order, start=1):
+        rec = _save_crop_and_record(bgr_img, boxes[k], labels[k], scores[k],
+                                    "rcnn", output_dir, base, ext, rank)
+        if rec is not None:
+            results.append(rec)
     return results
 
 
-def predict_yolo(model, image_path, max_crops=4):
-    try:
-        results = model.predict(image_path, imgsz=320)
-        predictions = []
-        bboxes = []
-        labels = []
-        confidences = []
-        for result in results:
-            if result.boxes:
-                print(f"YOLO raw boxes for {os.path.basename(image_path)}: {len(result.boxes)}")
-                for box in result.boxes:
-                    confidence = box.conf.item()
-                    if confidence < 0.1:
-                        continue
-                    class_id = int(box.cls.item()) + 1  # YOLO 标签从 0 开始，调整为从 1 开始以匹配 Faster R-CNN
-                    class_name = class_names.get(class_id, "unknown")
-                    # 跳过未知类别的预测
-                    if class_name == "unknown":
-                        continue
-                    xyxy = box.xyxy[0].cpu().numpy()
-                    bbox = [xyxy[0], xyxy[1], xyxy[2], xyxy[3]]
-                    bboxes.append(bbox)
-                    labels.append(class_id)
-                    confidences.append(confidence)
-                    predictions.append((class_name, confidence, bbox, "Detected"))
-
-        valid_indices = list(range(len(confidences)))  # 已经过滤 >0.1
-        print(f"Number of valid boxes before limiting (yolo): {len(valid_indices)}")
-        if len(valid_indices) > max_crops:
-            sorted_indices = np.argsort(confidences)[-max_crops:]
-            valid_indices = [valid_indices[j] for j in sorted_indices]
-            print(f"Number of boxes after limiting (yolo): {len(valid_indices)}")
-
-        yolo_results = []
-        for i in valid_indices:
-            bbox = bboxes[i]
-            label = labels[i]
-            score = confidences[i]
-            yolo_results.append((class_names.get(label, 'unknown'), score, bbox, "Detected"))
-
-        if not yolo_results:
-            yolo_results = [("unknown", 0.0, None, "No detections")]
-
-        return yolo_results
-    except Exception as e:
-        raise ValueError(f"YOLO 预测失败: {str(e)}")
 
 
-def save_crops(img, img_output_dir, base_name, ext, predictions_info, model_type, start_num=1):
-    saved_count = 0
-    for idx, (class_name, score, bbox, status) in enumerate(predictions_info):
-        if status == "Detected" and bbox is not None:
-            x_min, y_min, x_max, y_max = map(int, bbox)
 
-            x_min = max(0, x_min)
-            y_min = max(0, y_min)
-            x_max = min(img.shape[1], x_max)
-            y_max = min(img.shape[0], y_max)
-            width = x_max - x_min
-            height = y_max - y_min
-            if width > 0 and height > 0:
-                cropped_img = img[y_min:y_max, x_min:x_max]
-                if cropped_img.size > 0:
-                    label_text = f"{model_type}_{class_name}_{score:.2f}"
-                    crop_num = start_num + idx
-                    output_path = os.path.join(img_output_dir, f"{base_name}_{crop_num}_{label_text}{ext}")
-                    cv2.imwrite(output_path, cropped_img)
-                    print(f"保存裁切图像到 {output_path}")
-                    saved_count += 1
-    return saved_count
+def find_latest_rcnn_best(base="runs/train"):
+    if not os.path.isdir(base):
+        return None
+    candidates = []
+    for d in sorted(os.listdir(base)):
+        exp_dir = os.path.join(base, d)
+        if not (d.startswith("exp") and d[3:].isdigit() and os.path.isdir(exp_dir)):
+            continue
+        p = os.path.join(exp_dir, "weights", "best.pt")
+        if not os.path.isfile(p):
+            continue
+        candidates.append((int(d[3:]), p))
+    if not candidates:
+        return None
+    device = torch.device("cpu")
+    for _, p in sorted(candidates, reverse=True):
+        try:
+            sd = torch.load(p, map_location=device)
+            k = "roi_heads.box_predictor.cls_score.weight"
+            if k in sd and sd[k].shape[0] == 3:
+                return p
+        except Exception:
+            pass
+    return candidates[-1][1]
 
 
 def get_next_exp_dir(base_path="runs/predict"):
     os.makedirs(base_path, exist_ok=True)
-    exp_dirs = [d for d in os.listdir(base_path) if d.startswith("exp") and os.path.isdir(os.path.join(base_path, d))]
-    exp_nums = [int(d.replace("exp", "")) for d in exp_dirs if d.replace("exp", "").isdigit()]
-    next_exp_num = max(exp_nums, default=0) + 1
-    exp_dir = os.path.join(base_path, f"exp{next_exp_num}")
+    nums = []
+    for d in os.listdir(base_path):
+        if d.startswith("exp") and d[3:].isdigit() and os.path.isdir(os.path.join(base_path, d)):
+            nums.append(int(d[3:]))
+    n = (max(nums) + 1) if nums else 1
+    exp_dir = os.path.join(base_path, f"exp{n}")
     os.makedirs(exp_dir, exist_ok=True)
     return exp_dir
 
 
-def predict_folder(yolo_weights, rcnn_weights, test_dir="./data/BoeingFewShot/Q/images",
-                   output_dir=r"./data/BoeingFewShot/crop"):
-
-    test_dir = os.path.abspath(test_dir)  # 转换为绝对路径
+def predict_folder(rcnn_weights, test_dir, output_dir,
+                   conf_thr=0.5, max_crops=6, nms_iou=0.5,
+                   clean_output_dir=True,
+                   summary_csv=True):
+    test_dir = os.path.abspath(test_dir)
+    output_dir = os.path.abspath(output_dir)
     if not os.path.exists(test_dir):
-        raise FileNotFoundError(f"测试路径 {test_dir} 不存在")
-    print(f"Loaded test directory: {test_dir}")
+        raise FileNotFoundError(f"测试路径不存在: {test_dir}")
+    print(f"[INFO] Test dir: {test_dir}")
 
-
-    yolo_weights = os.path.abspath(yolo_weights)
     rcnn_weights = os.path.abspath(rcnn_weights)
-    if not os.path.exists(yolo_weights):
-        raise FileNotFoundError(f"YOLO 权重文件不存在: {yolo_weights}")
-    if not os.path.exists(rcnn_weights):
-        raise FileNotFoundError(f"Faster R-CNN 权重文件不存在: {rcnn_weights}")
+    if not os.path.isfile(rcnn_weights):
+        auto = find_latest_rcnn_best()
+        if auto and os.path.isfile(auto):
+            print(f"[INFO] 指定的 R-CNN 权重不存在，自动回退到: {auto}")
+            rcnn_weights = auto
+        else:
+            raise FileNotFoundError(f"Faster R-CNN 权重不存在: {rcnn_weights}")
 
 
-    import shutil
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
+    if clean_output_dir and os.path.isdir(output_dir):
+        bak = output_dir + ".bak"
+        if os.path.isdir(bak):
+            try:
+                shutil.rmtree(bak)
+            except Exception as e:
+                print(f"[WARN] 无法清理旧 bak: {e}")
+        try:
+            shutil.move(output_dir, bak)
+            print(f"[INFO] 旧 crop 目录已备份到 {bak}")
+        except Exception as e:
+            print(f"[WARN] move output_dir 失败，尝试清空内容: {e}")
+            try:
+                for name in os.listdir(output_dir):
+                    p = os.path.join(output_dir, name)
+                    if os.path.isdir(p):
+                        shutil.rmtree(p)
+                    else:
+                        os.remove(p)
+            except Exception as e2:
+                raise RuntimeError(f"无法清理输出目录 {output_dir}: {e2}") from e2
     os.makedirs(output_dir, exist_ok=True)
 
-
-    image_paths = [os.path.join(test_dir, f) for f in os.listdir(test_dir) if
-                   f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    exts = (".jpg", ".jpeg", ".png", ".bmp")
+    image_paths = sorted([os.path.join(test_dir, f) for f in os.listdir(test_dir)
+                          if f.lower().endswith(exts)])
     if not image_paths:
-        raise ValueError(f"文件夹 {test_dir} 中没有找到 .jpg 或 .png 图像文件")
+        raise ValueError(f"{test_dir} 中没有找到图片")
+    print(f"[INFO] Found {len(image_paths)} images")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    yolo_model = load_yolo_model(yolo_weights)
+    print(f"[INFO] Device: {device}")
     rcnn_model = load_faster_rcnn_model(rcnn_weights, device)
-
     exp_dir = get_next_exp_dir()
-    output_csv_yolo = os.path.join(exp_dir, "predictions_yolo.csv")
-    output_csv_rcnn = os.path.join(exp_dir, "predictions_rcnn.csv")
+    print(f"[INFO] Experiment dir: {exp_dir}")
 
-    predictions_yolo = []
-    predictions_rcnn = []
+    csv_rcnn = os.path.join(exp_dir, "predictions_rcnn.csv")
+    preds_rcnn = []
 
-    for image_path in image_paths:
-        img_name = os.path.basename(image_path)
-        base_name, ext = os.path.splitext(img_name)
-        img_output_dir = os.path.join(output_dir, base_name)
-        os.makedirs(img_output_dir, exist_ok=True)
-        img = cv2.imread(image_path)
-        if img is None:
-            print(f"无法加载图像 {image_path}")
-            continue
-
+    for i, ip in enumerate(image_paths, 1):
+        name = os.path.basename(ip)
+        print(f"[{i}/{len(image_paths)}] {name}")
         try:
-            current_count = 0
-
-            yolo_results = predict_yolo(yolo_model, image_path, max_crops=4)
-
-            yolo_saved = save_crops(img, img_output_dir, base_name, ext, yolo_results, 'yolo', start_num=1)
-            current_count += yolo_saved
-
-            for class_name, confidence, bbox, status in yolo_results:
-                bbox_str = str(bbox) if bbox else "None"
-                predictions_yolo.append([img_name, class_name, f"{confidence:.4f}", bbox_str, status])
-                print(f"YOLO - 图像: {img_name}, 预测: {class_name}, 置信度: {confidence:.4f}, 边界框: {bbox_str}, 状态: {status}")
-
-            if current_count < 4:
-                remaining_crops = 4 - current_count
-                rcnn_start_num = current_count + 1
-                rcnn_results = predict_faster_rcnn(rcnn_model, image_path, device, max_crops=remaining_crops, threshold=0.1)
-
-                rcnn_saved = save_crops(img, img_output_dir, base_name, ext, rcnn_results, 'rcnn', start_num=rcnn_start_num)
-                current_count += rcnn_saved
-
-                for class_name, confidence, bbox, status in rcnn_results:
-                    bbox_str = str(bbox) if bbox else "None"
-                    predictions_rcnn.append([img_name, class_name, f"{confidence:.4f}", bbox_str, status])
-                    print(f"Faster R-CNN - 图像: {img_name}, 预测: {class_name}, 置信度: {confidence:.4f}, 边界框: {bbox_str}, 状态: {status}")
-            else:
-                predictions_rcnn.append([img_name, "skipped", "N/A", "None", "Skipped (YOLO sufficient)"])
-
-            if current_count == 0:
-                original_path = os.path.join(img_output_dir, f"{base_name}_original{ext}")
-                cv2.imwrite(original_path, img)
-                print(f"保存原图到 {original_path} (文件夹为空)")
-
+            img = _imread(ip)
+            if img is None:
+                raise ValueError("cv2 无法加载")
+            rrec = predict_rcnn(rcnn_model, img, ip, output_dir, device,
+                                conf_thr, max_crops, nms_iou)
+            if not rrec:
+                rrec = _save_fallback(img, ip, output_dir)
+            for cn, cf, bb, st in rrec:
+                preds_rcnn.append([name, cn, f"{cf:.4f}",
+                                   str(bb).replace(" ", "") if bb else "None", st])
+                print(f"    rcnn -> {cn} {cf:.4f}")
+            del img, rrec
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         except Exception as e:
-            print(f"预测图像 {image_path} 失败: {str(e)}")
-            predictions_yolo.append([img_name, "error", str(e), "None", "Error"])
-            predictions_rcnn.append([img_name, "error", str(e), "None", "Error"])
+            print(f"[ERROR] {name}: {e}")
+            preds_rcnn.append([name, "error", str(e), "None", "Error"])
 
-    with open(output_csv_yolo, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(["Image", "Predicted Class", "Confidence/Error", "Bounding Box", "Status"])
-        writer.writerows(predictions_yolo)
+    def _write_csv(path, rows):
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["Image", "Predicted Class", "Confidence/Error", "Bounding Box", "Status"])
+            w.writerows(rows)
 
-    with open(output_csv_rcnn, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(["Image", "Predicted Class", "Confidence/Error", "Bounding Box", "Status"])
-        writer.writerows(predictions_rcnn)
+    _write_csv(csv_rcnn, preds_rcnn)
+    print(f"[DONE] R-CNN: {csv_rcnn}  (rows={len(preds_rcnn)})")
 
-    print(f"YOLO 预测完成，结果已保存到 {output_csv_yolo}")
-    print(f"Faster R-CNN 预测完成，结果已保存到 {output_csv_rcnn}")
-    print(f"裁切图像已保存到 {output_dir}")
-    return predictions_yolo, predictions_rcnn
+    if summary_csv:
+        n_crops = 0
+        for d in os.listdir(output_dir):
+            sub = os.path.join(output_dir, d)
+            if os.path.isdir(sub):
+                n_crops += len([x for x in os.listdir(sub) if x.lower().endswith(exts)])
+        summary = os.path.join(exp_dir, "summary.txt")
+        with open(summary, "w", encoding="utf-8") as f:
+            f.write(f"images        = {len(image_paths)}\n")
+            f.write(f"rcnn_weights  = {rcnn_weights}\n")
+            f.write(f"yolo_weights  = DISABLED (YOLO 分支已注释，只采用 Faster R-CNN)\n")
+            f.write(f"conf_thr      = {conf_thr}\n")
+            f.write(f"max_crops/img = {max_crops}\n")
+            f.write(f"nms_iou       = {nms_iou}\n")
+            f.write(f"output_dir    = {output_dir}\n")
+            f.write(f"total_crops   = {n_crops}\n")
+        print(f"[INFO] total crops written = {n_crops}")
+    print(f"[DONE] crops output -> {output_dir}")
+    return preds_rcnn
+
+
+
+
+def main():
+    parser = argparse.ArgumentParser(description="BoeingFewShot crop 生成 (仅 Faster R-CNN，YOLO 分支已注释禁用)")
+    parser.add_argument("--rcnn-weights", type=str, default=None,
+                        help="R-CNN 权重路径（默认自动找最新 Boeing exp）")
+    parser.add_argument("--test-dir", type=str, default="./datasets/BoeingFewShot/Q/images",
+                        help="Query 图目录")
+    parser.add_argument("--output-dir", type=str, default="./datasets/BoeingFewShot/crop",
+                        help="crop 输出目录")
+    parser.add_argument("--conf", type=float, default=0.5,
+                        help="置信度阈值 (默认 0.5，训练期 crop_purity 0.59 的合理阈值)")
+    parser.add_argument("--max-crops", type=int, default=6,
+                        help="每张图、每个模型最多保留多少 crop (默认 6)")
+    parser.add_argument("--nms-iou", type=float, default=0.5,
+                        help="per-class NMS IoU 阈值 (默认 0.5)")
+    parser.add_argument("--no-clean", action="store_true",
+                        help="不清空旧 crop 目录，在旧目录上继续追加")
+    args = parser.parse_args()
+
+    rcnn_weights = args.rcnn_weights
+    if rcnn_weights is None:
+        auto = find_latest_rcnn_best()
+        if auto is None:
+            raise SystemExit("[FATAL] 未找到任何 R-CNN 权重 (runs/train/exp*/weights/best.pt, cls_score.out_features=3)")
+        rcnn_weights = auto
+
+
+    predict_folder(
+        rcnn_weights=rcnn_weights,
+        test_dir=args.test_dir,
+        output_dir=args.output_dir,
+        conf_thr=args.conf,
+        max_crops=args.max_crops,
+        nms_iou=args.nms_iou,
+        clean_output_dir=not args.no_clean,
+    )
 
 
 if __name__ == "__main__":
-    yolo_weights = "your path"
-    rcnn_weights = "your path"
-    test_dir = "your path"
-    output_dir = "your path"
-    try:
-        predictions_yolo, predictions_rcnn = predict_folder(yolo_weights, rcnn_weights, test_dir, output_dir)
-    except Exception as e:
-        print(f"预测失败: {str(e)}")
+    main()

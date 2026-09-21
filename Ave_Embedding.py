@@ -1,5 +1,6 @@
 import os
 import numpy as np
+from pathlib import Path
 
 
 def load_embeddings(directory):
@@ -16,8 +17,8 @@ def load_embeddings(directory):
             file_path = os.path.join(directory, file_name)
             try:
                 embedding = np.loadtxt(file_path)
-                if embedding.shape != (2048,):
-                    print(f"警告：{file_name} 的维度为 {embedding.shape}，预期为 (2048,)，跳过")
+                if embedding.ndim != 1:
+                    print(f"警告：{file_name} 的维度为 {embedding.shape}，预期为一维向量，跳过")
                     continue
                 embeddings.append(embedding)
                 file_names.append(file_name)
@@ -49,10 +50,10 @@ def save_average_embedding(average_embedding, output_dir, output_filename):
 
 def main():
     directories = {
-        'scratches': "your path",
-        'stain': "your path"
+        'scratches': "./datasets/BoeingFewShot/embeddings/S",
+        'stain': "./datasets/BoeingFewShot/embeddings/T"
     }
-    output_dir = "your path"
+    output_dir = "./datasets/BoeingFewShot/embeddings/AveEmbedding"
 
     for category, directory in directories.items():
         try:
@@ -76,5 +77,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()
